@@ -2,31 +2,27 @@ package multichan
 
 import (
 	"fmt"
+	"log"
 	"reflect"
 	"sync"
 )
 
 // W is the writing end of a one-to-many data channel.
 type W struct {
-	mu   sync.Mutex
-	cond sync.Cond
+	mu sync.Mutex
 
 	zero     interface{}  // the zero value of this channel
 	zerotype reflect.Type // the type of the zero value
 
-	closed bool
-
-	items  []interface{} // items written and waiting to be read
-	offset int           // position in the stream of items[0]
-
-	readerpos []int // each reader's position in the stream; -1 is a disposed-of reader
+	chans []chan<- interface{}
 }
 
 // R is the reading end of a one-to-many data channel.
 type R struct {
-	id  int
-	w   *W
-	pos int
+	C    <-chan interface{}
+	w    *W
+	id   int
+	zero interface{}
 }
 
 // New produces a new multichan writer.
@@ -38,7 +34,6 @@ func New(zero interface{}) *W {
 		zero:     zero,
 		zerotype: reflect.TypeOf(zero),
 	}
-	w.cond.L = &w.mu
 	return w
 }
 
@@ -55,9 +50,14 @@ func (w *W) Write(item interface{}) {
 		panic(fmt.Sprintf("cannot write %s to multichan of %s", t, w.zerotype))
 	}
 	w.mu.Lock()
-	w.items = append(w.items, item)
-	w.trim()
-	w.cond.Broadcast()
+	for i, ch := range w.chans {
+		if ch != nil {
+			go func() {
+				log.Printf("sending to reader %d", i)
+				ch <- item
+			}()
+		}
+	}
 	w.mu.Unlock()
 }
 
@@ -66,8 +66,13 @@ func (w *W) Write(item interface{}) {
 // Reading past the end of the stream produces the zero value that was passed to New.
 func (w *W) Close() {
 	w.mu.Lock()
-	w.closed = true
-	w.cond.Broadcast()
+	for i, ch := range w.chans {
+		if ch != nil {
+			log.Printf("closing channel to reader %d", i)
+			close(ch)
+			w.chans[i] = nil
+		}
+	}
 	w.mu.Unlock()
 }
 
@@ -76,37 +81,15 @@ func (w *W) Close() {
 func (w *W) Reader() *R {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	id := len(w.readerpos)
-	w.readerpos = append(w.readerpos, 0)
+
+	id := len(w.chans)
+	ch := make(chan interface{})
+	w.chans = append(w.chans, ch)
 	return &R{
-		id:  id,
-		w:   w,
-		pos: w.offset,
-	}
-}
-
-// w.mu is held
-func (w *W) streamlen() int {
-	return w.offset + len(w.items)
-}
-
-// w.mu is held
-func (w *W) item(pos int) interface{} {
-	return w.items[pos-w.offset]
-}
-
-// trim shortens the items slice to just what's needed by the laggiest reader.
-// w.mu must be held.
-func (w *W) trim() {
-	min := w.streamlen()
-	for _, p := range w.readerpos {
-		if p >= 0 && p < min {
-			min = p
-		}
-	}
-	if delta := min - w.offset; delta > 0 {
-		w.items = w.items[delta:]
-		w.offset += delta
+		C:    ch,
+		w:    w,
+		id:   id,
+		zero: w.zero,
 	}
 }
 
@@ -116,15 +99,12 @@ func (w *W) trim() {
 // this returns the multichan's zero value (see New) and false.
 // Otherwise it returns the next value and true.
 func (r *R) Read() (interface{}, bool) {
-	r.w.mu.Lock()
-	defer r.w.mu.Unlock()
-	for r.pos >= r.w.streamlen() && !r.w.closed {
-		r.w.cond.Wait()
+	log.Printf("reading with reader %d", r.id)
+	item, ok := <-r.C
+	if !ok {
+		return r.zero, false
 	}
-	if r.pos >= r.w.streamlen() {
-		return r.w.zero, false
-	}
-	return r.doRead(), true
+	return item, true
 }
 
 // NBRead does a non-blocking read on the multichan.
@@ -133,28 +113,21 @@ func (r *R) Read() (interface{}, bool) {
 // this returns the multichan's zero value (see New) and false.
 // Otherwise it returns the next value and true.
 func (r *R) NBRead() (interface{}, bool) {
-	r.w.mu.Lock()
-	defer r.w.mu.Unlock()
-	if r.pos >= r.w.streamlen() {
-		return r.w.zero, false
+	select {
+	case item, ok := <-r.C:
+		if !ok {
+			return r.zero, false
+		}
+		return item, true
+	default:
+		return r.zero, false
 	}
-	return r.doRead(), true
 }
 
 // Dispose removes r from its multichan, freeing up resources.
 // It is an error to make further method calls on r after Dispose.
 func (r *R) Dispose() {
 	r.w.mu.Lock()
-	r.w.readerpos[r.id] = -1
-	r.w.trim()
+	r.w.chans[r.id] = nil
 	r.w.mu.Unlock()
-}
-
-// r.w.mu is held, r.w.streamlen() > r.pos
-func (r *R) doRead() interface{} {
-	result := r.w.item(r.pos)
-	r.pos++
-	r.w.readerpos[r.id] = r.pos
-	r.w.trim()
-	return result
 }
