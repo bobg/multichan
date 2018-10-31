@@ -19,7 +19,7 @@ type W struct {
 	items  []interface{} // items written and waiting to be read
 	offset int           // position in the stream of items[0]
 
-	readerpos []int // each reader's position in the stream
+	readerpos []int // each reader's position in the stream; -1 is a disposed-of reader
 }
 
 // R is the reading end of a one-to-many data channel.
@@ -56,6 +56,7 @@ func (w *W) Write(item interface{}) {
 	}
 	w.mu.Lock()
 	w.items = append(w.items, item)
+	w.trim()
 	w.cond.Broadcast()
 	w.mu.Unlock()
 }
@@ -71,6 +72,7 @@ func (w *W) Close() {
 }
 
 // Reader adds a new reader to the multichan and returns it.
+// Readers consume resources in the multichan and should be disposed of (with Dispose) when no longer needed.
 func (w *W) Reader() *R {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -91,6 +93,21 @@ func (w *W) streamlen() int {
 // w.mu is held
 func (w *W) item(pos int) interface{} {
 	return w.items[pos-w.offset]
+}
+
+// trim shortens the items slice to just what's needed by the laggiest reader.
+// w.mu must be held.
+func (w *W) trim() {
+	min := w.streamlen()
+	for _, p := range w.readerpos {
+		if p >= 0 && p < min {
+			min = p
+		}
+	}
+	if delta := min - w.offset; delta > 0 {
+		w.items = w.items[delta:]
+		w.offset += delta
+	}
 }
 
 // Read reads the next item in the multichan.
@@ -124,22 +141,20 @@ func (r *R) NBRead() (interface{}, bool) {
 	return r.doRead(), true
 }
 
+// Dispose removes r from its multichan, freeing up resources.
+// It is an error to make further method calls on r after Dispose.
+func (r *R) Dispose() {
+	r.w.mu.Lock()
+	r.w.readerpos[r.id] = -1
+	r.w.trim()
+	r.w.mu.Unlock()
+}
+
 // r.w.mu is held, r.w.streamlen() > r.pos
 func (r *R) doRead() interface{} {
 	result := r.w.item(r.pos)
 	r.pos++
 	r.w.readerpos[r.id] = r.pos
-
-	min := r.w.streamlen()
-	for _, p := range r.w.readerpos {
-		if p < min {
-			min = p
-		}
-	}
-	if delta := min - r.w.offset; delta > 0 {
-		r.w.items = r.w.items[delta:]
-		r.w.offset += delta
-	}
-
+	r.w.trim()
 	return result
 }

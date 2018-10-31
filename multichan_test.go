@@ -140,3 +140,22 @@ func Test100(t *testing.T) {
 	}
 	w.Close()
 }
+
+func TestTrim(t *testing.T) {
+	w := New(0)
+
+	w.Write(1)
+	r := w.Reader()
+	w.Write(2)
+	got, ok := r.Read()
+	if !ok {
+		t.Fatal("unexpected end of stream")
+	}
+	gotInt, ok := got.(int)
+	if !ok {
+		t.Fatalf("unexpected %T on read, want int", got)
+	}
+	if gotInt != 2 {
+		t.Errorf("got %d, want 2", gotInt)
+	}
+}
