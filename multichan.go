@@ -1,6 +1,7 @@
 package multichan
 
 import (
+	"context"
 	"fmt"
 	"reflect"
 	"sync"
@@ -111,17 +112,35 @@ func (w *W) trim() {
 }
 
 // Read reads the next item in the multichan.
-// It blocks until an item is ready to read.
+// It blocks until an item is ready to read or its context is canceled.
 // If the multichan is closed and the last item has already been consumed,
+// or the context is canceled,
 // this returns the multichan's zero value (see New) and false.
 // Otherwise it returns the next value and true.
-func (r *R) Read() (interface{}, bool) {
+// The context argument may be nil.
+func (r *R) Read(ctx context.Context) (interface{}, bool) {
+	if ctx != nil {
+		done := make(chan struct{})
+		defer close(done)
+
+		go func() {
+			select {
+			case <-ctx.Done():
+				r.w.mu.Lock()
+				r.w.cond.Broadcast()
+				r.w.mu.Unlock()
+
+			case <-done:
+			}
+		}()
+	}
+
 	r.w.mu.Lock()
 	defer r.w.mu.Unlock()
-	for r.pos >= r.w.streamlen() && !r.w.closed {
+	for r.pos >= r.w.streamlen() && !r.w.closed && ctx.Err() == nil {
 		r.w.cond.Wait()
 	}
-	if r.pos >= r.w.streamlen() {
+	if (ctx != nil && ctx.Err() != nil) || r.pos >= r.w.streamlen() {
 		return r.w.zero, false
 	}
 	return r.doRead(), true

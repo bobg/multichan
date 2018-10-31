@@ -12,7 +12,7 @@ func TestSimple(t *testing.T) {
 	ready := make(chan struct{})
 	go func() {
 		for {
-			g, ok := r.Read()
+			g, ok := r.Read(nil)
 			if !ok {
 				break
 			}
@@ -46,7 +46,7 @@ func TestTwo(t *testing.T) {
 
 	go func() {
 		for {
-			g, ok := r1.Read()
+			g, ok := r1.Read(nil)
 			if !ok {
 				break
 			}
@@ -57,7 +57,7 @@ func TestTwo(t *testing.T) {
 
 	go func() {
 		for {
-			g, ok := r2.Read()
+			g, ok := r2.Read(nil)
 			if !ok {
 				break
 			}
@@ -121,7 +121,7 @@ func Test100(t *testing.T) {
 
 	go func() {
 		for i := 1; i <= 100; i++ {
-			g, ok := r.Read()
+			g, ok := r.Read(nil)
 			got := g.(int)
 			if !ok {
 				t.Error("unexpected end of stream")
@@ -129,7 +129,7 @@ func Test100(t *testing.T) {
 				t.Errorf("got %d, want %d", got, i)
 			}
 		}
-		_, ok := r.Read()
+		_, ok := r.Read(nil)
 		if ok {
 			t.Errorf("unexpected non-end of stream")
 		}
@@ -147,7 +147,7 @@ func TestTrim(t *testing.T) {
 	w.Write(1)
 	r := w.Reader()
 	w.Write(2)
-	got, ok := r.Read()
+	got, ok := r.Read(nil)
 	if !ok {
 		t.Fatal("unexpected end of stream")
 	}
