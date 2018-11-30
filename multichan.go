@@ -17,17 +17,20 @@ type W struct {
 
 	closed bool
 
-	items  []interface{} // items written and waiting to be read
-	offset int           // position in the stream of items[0]
+	head *item
 
-	readerpos []int // each reader's position in the stream; -1 is a disposed-of reader
+	pendingReaders []*R // readers that don't have their next field set yet
+}
+
+type item struct {
+	next *item
+	val  interface{}
 }
 
 // R is the reading end of a one-to-many data channel.
 type R struct {
-	id  int
-	w   *W
-	pos int
+	w    *W
+	next **item // points to the next field in an item
 }
 
 // New produces a new multichan writer.
@@ -50,16 +53,26 @@ func New(zero interface{}) *W {
 //
 // Each item written to w remains in an internal queue until the last reader has consumed it.
 // Readers added later to a multichan may miss items added earlier.
-func (w *W) Write(item interface{}) {
-	t := reflect.TypeOf(item)
+func (w *W) Write(val interface{}) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	t := reflect.TypeOf(val)
 	if !t.AssignableTo(w.zerotype) {
 		panic(fmt.Sprintf("cannot write %s to multichan of %s", t, w.zerotype))
 	}
-	w.mu.Lock()
-	w.items = append(w.items, item)
-	w.trim()
+	oldHead := w.head
+	it := &item{val: val}
+	w.head = it
+	if oldHead != nil {
+		oldHead.next = w.head
+	}
+
+	for _, r := range w.pendingReaders {
+		r.next = &it
+	}
+	w.pendingReaders = nil
+
 	w.cond.Broadcast()
-	w.mu.Unlock()
 }
 
 // Close closes the writing end of a multichan,
@@ -77,38 +90,9 @@ func (w *W) Close() {
 func (w *W) Reader() *R {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	id := len(w.readerpos)
-	w.readerpos = append(w.readerpos, 0)
-	return &R{
-		id:  id,
-		w:   w,
-		pos: w.offset,
-	}
-}
-
-// w.mu is held
-func (w *W) streamlen() int {
-	return w.offset + len(w.items)
-}
-
-// w.mu is held
-func (w *W) item(pos int) interface{} {
-	return w.items[pos-w.offset]
-}
-
-// trim shortens the items slice to just what's needed by the laggiest reader.
-// w.mu must be held.
-func (w *W) trim() {
-	min := w.streamlen()
-	for _, p := range w.readerpos {
-		if p >= 0 && p < min {
-			min = p
-		}
-	}
-	if delta := min - w.offset; delta > 0 {
-		w.items = w.items[delta:]
-		w.offset += delta
-	}
+	r := &R{w: w}
+	w.pendingReaders = append(w.pendingReaders, r)
+	return r
 }
 
 // Read reads the next item in the multichan.
@@ -137,13 +121,16 @@ func (r *R) Read(ctx context.Context) (interface{}, bool) {
 
 	r.w.mu.Lock()
 	defer r.w.mu.Unlock()
-	for r.pos >= r.w.streamlen() && !r.w.closed && ctx.Err() == nil {
+
+	for (ctx == nil || ctx.Err() == nil) && !r.w.closed && (r.next == nil || *r.next == nil) {
 		r.w.cond.Wait()
 	}
-	if (ctx != nil && ctx.Err() != nil) || r.pos >= r.w.streamlen() {
-		return r.w.zero, false
+	if r.next != nil && *r.next != nil {
+		val := (*r.next).val
+		r.next = &(*r.next).next
+		return val, true
 	}
-	return r.doRead(), true
+	return r.w.zero, false
 }
 
 // NBRead does a non-blocking read on the multichan.
@@ -154,26 +141,16 @@ func (r *R) Read(ctx context.Context) (interface{}, bool) {
 func (r *R) NBRead() (interface{}, bool) {
 	r.w.mu.Lock()
 	defer r.w.mu.Unlock()
-	if r.pos >= r.w.streamlen() {
-		return r.w.zero, false
+	if r.next != nil && *r.next != nil {
+		val := (*r.next).val
+		r.next = &(*r.next).next
+		return val, true
 	}
-	return r.doRead(), true
+	return r.w.zero, false
 }
 
 // Dispose removes r from its multichan, freeing up resources.
 // It is an error to make further method calls on r after Dispose.
 func (r *R) Dispose() {
-	r.w.mu.Lock()
-	r.w.readerpos[r.id] = -1
-	r.w.trim()
-	r.w.mu.Unlock()
-}
-
-// r.w.mu is held, r.w.streamlen() > r.pos
-func (r *R) doRead() interface{} {
-	result := r.w.item(r.pos)
-	r.pos++
-	r.w.readerpos[r.id] = r.pos
-	r.w.trim()
-	return result
+	// Do nothing. (An earlier implementation had code here.)
 }
