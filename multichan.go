@@ -37,6 +37,13 @@ type R struct {
 	// This is nil for a new reader.
 	// The first time Write is called,
 	// it's set to the address of the writer's "head" field.
+	//
+	// (Why a pointer to a pointer?
+	// If the reader consumes the newest item in the queue,
+	// that item's "next" field is nil.
+	// When a new item is added with Write,
+	// that same field is updated to point to it;
+	// so we point to that field in order to see that update.)
 	next **item // points to the next field in an item
 }
 
