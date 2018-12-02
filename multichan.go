@@ -22,6 +22,7 @@ type W struct {
 	pendingReaders []*R // readers that don't have their next field set yet
 }
 
+// Each item points to the next newer item in the queue.
 type item struct {
 	next *item
 	val  interface{}
@@ -29,7 +30,13 @@ type item struct {
 
 // R is the reading end of a one-to-many data channel.
 type R struct {
-	w    *W
+	w *W
+
+	// Points to a pointer to the next item the reader will return.
+	// When one item is consumed, this is set to the address of that item's "next" field.
+	// This is nil for a new reader.
+	// The first time Write is called,
+	// it's set to the address of the writer's "head" field.
 	next **item // points to the next field in an item
 }
 
