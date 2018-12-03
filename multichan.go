@@ -33,10 +33,12 @@ type R struct {
 	w *W
 
 	// Points to a pointer to the next item the reader will return.
-	// When one item is consumed, this is set to the address of that item's "next" field.
 	// This is nil for a new reader.
-	// The first time Write is called,
-	// it's set to the address of the writer's "head" field.
+	// The first time Write is called after a particular reader is created,
+	// this gets set to a pointer to the new item.
+	// Thereafter,
+	// each time read consumes an item,
+	// this gets set to the address of that item's "next" field.
 	//
 	// (Why a pointer to a pointer?
 	// If the reader consumes the newest item in the queue,
@@ -44,7 +46,7 @@ type R struct {
 	// When a new item is added with Write,
 	// that same field is updated to point to it;
 	// so we point to that field in order to see that update.)
-	next **item // points to the next field in an item
+	next **item
 }
 
 // New produces a new multichan writer.
@@ -74,15 +76,16 @@ func (w *W) Write(val interface{}) {
 	if !t.AssignableTo(w.zerotype) {
 		panic(fmt.Sprintf("cannot write %s to multichan of %s", t, w.zerotype))
 	}
+
+	newItem := &item{val: val}
 	oldHead := w.head
-	it := &item{val: val}
-	w.head = it
+	w.head = newItem
 	if oldHead != nil {
-		oldHead.next = w.head
+		oldHead.next = newItem
 	}
 
 	for _, r := range w.pendingReaders {
-		r.next = &it
+		r.next = &newItem
 	}
 	w.pendingReaders = nil
 
